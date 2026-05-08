@@ -49,6 +49,7 @@ from src.config import Config, get_config
 from src.search_service import (
     AnspireSearchProvider,
     SearchService,
+    TavilySearchProvider,
     get_search_service,
     reset_search_service,
 )
@@ -426,7 +427,7 @@ class TestAnspireSearchService(unittest.TestCase):
         self.assertEqual(len(anspire_providers), 0)
     
     def test_search_service_priority(self):
-        """测试 Anspire 优先级"""
+        """测试 Tavily 优先级（配置 Tavily 时始终第一位）"""
         service = SearchService(
             anspire_keys=["anspire_key"],
             bocha_keys=["bocha_key"],
@@ -435,8 +436,9 @@ class TestAnspireSearchService(unittest.TestCase):
             news_max_age_days=3,
             news_strategy_profile="short"
         )
-        
-        self.assertIsInstance(service._providers[0], AnspireSearchProvider)
+
+        self.assertIsInstance(service._providers[0], TavilySearchProvider)
+        self.assertIsInstance(service._providers[1], AnspireSearchProvider)
 
 
 class TestAnspireIntegration(unittest.TestCase):

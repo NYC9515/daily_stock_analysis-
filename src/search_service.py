@@ -2273,15 +2273,15 @@ class SearchService:
         )
 
         # 初始化搜索引擎（按优先级排序）
-        # 1. Bocha 优先（中文搜索优化，AI摘要）
-        if bocha_keys:
-            self._providers.append(BochaSearchProvider(bocha_keys))
-            logger.info(f"已配置 Bocha 搜索，共 {len(bocha_keys)} 个 API Key")
-
-        # 2. Tavily（免费额度更多，每月 1000 次）
+        # 1. Tavily 优先（稳定新闻检索）
         if tavily_keys:
             self._providers.append(TavilySearchProvider(tavily_keys))
             logger.info(f"已配置 Tavily 搜索，共 {len(tavily_keys)} 个 API Key")
+
+        # 2. Bocha（中文搜索优化，AI摘要）
+        if bocha_keys:
+            self._providers.append(BochaSearchProvider(bocha_keys))
+            logger.info(f"已配置 Bocha 搜索，共 {len(bocha_keys)} 个 API Key")
 
         # 3. Brave Search（隐私优先，全球覆盖）
         if brave_keys:
@@ -2312,7 +2312,9 @@ class SearchService:
 
         # 7. Anspire Search（实时智能搜索优化）
         if anspire_keys:
-            self._providers.insert(0, AnspireSearchProvider(anspire_keys))
+            # Keep Tavily as top priority when configured.
+            insert_at = 1 if tavily_keys and len(self._providers) >= 1 else 0
+            self._providers.insert(insert_at, AnspireSearchProvider(anspire_keys))
             logger.info(f"已配置 Anspire Search 搜索，共 {len(anspire_keys)} 个 API Key")
             
         if not self._providers:

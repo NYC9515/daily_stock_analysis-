@@ -978,8 +978,8 @@ class Config:
         Rules:
         - Strip exchange prefix/suffix when possible (e.g. SH600519, 1810.HK).
         - Keep US tickers uppercase (e.g. aapl -> AAPL).
-        - Canonicalize HK numeric codes to HKxxxxx for dedupe consistency
-          (e.g. 700, 00700, hk700 -> HK00700).
+        - Canonicalize HK numeric codes to 5-digit numeric form
+          (e.g. 700, 00700, hk700 -> 00700).
         - Preserve unknown tokens in uppercase for backward compatibility.
         """
         raw = (value or "").strip()
@@ -987,10 +987,7 @@ class Config:
             return ""
 
         normalized = normalize_code(raw)
-        canonical = (normalized or raw).strip().upper()
-        if canonical.isdigit() and len(canonical) == 5:
-            return f"HK{canonical}"
-        return canonical
+        return (normalized or raw).strip().upper()
 
     @classmethod
     def _parse_stock_list(cls, raw_value: Optional[str]) -> List[str]:

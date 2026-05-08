@@ -569,7 +569,7 @@ class TestEnvAliasCompatibility:
         ):
             config = Config._load_from_env()
 
-        assert config.stock_list == ["600519", "HK00700", "HK01810", "AAPL", "TSLA"]
+        assert config.stock_list == ["600519", "00700", "01810", "AAPL", "TSLA"]
 
     @patch("src.config.setup_env")
     @patch.object(Config, "_parse_litellm_yaml", return_value=[])

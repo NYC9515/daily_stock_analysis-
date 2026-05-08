@@ -1700,10 +1700,13 @@ class SearXNGSearchProvider(BaseSearchProvider):
     PUBLIC_INSTANCES_MAX_ATTEMPTS = 3
     PUBLIC_INSTANCES_TIMEOUT_SECONDS = 5
     SELF_HOSTED_TIMEOUT_SECONDS = 10
+    INSTANCE_PENALTY_SECONDS = 600
 
     _public_instances_cache: Optional[Tuple[float, List[str]]] = None
     _public_instances_stale_retry_after: float = 0.0
     _public_instances_lock = threading.Lock()
+    _penalized_instances: Dict[str, float] = {}
+    _penalized_instances_lock = threading.Lock()
 
     def __init__(self, base_urls: Optional[List[str]] = None, *, use_public_instances: bool = False):
         normalized_base_urls = [url.rstrip("/") for url in (base_urls or []) if url.strip()]
@@ -1723,10 +1726,98 @@ class SearXNGSearchProvider(BaseSearchProvider):
         with cls._public_instances_lock:
             cls._public_instances_cache = None
             cls._public_instances_stale_retry_after = 0.0
+        with cls._penalized_instances_lock:
+            cls._penalized_instances.clear()
+
+    @staticmethod
+    def _compact_error_text(message: str, *, limit: int = 120) -> str:
+        compact = " ".join((message or "").split())
+        if len(compact) <= limit:
+            return compact
+        return compact[: limit - 3] + "..."
+
+    @classmethod
+    def _is_rate_limited_error(cls, error_message: Optional[str]) -> bool:
+        lowered = (error_message or "").lower()
+        return any(
+            token in lowered
+            for token in (
+                "429",
+                "too many requests",
+                "rate limit",
+                "请求过于频繁",
+                "请求频繁",
+            )
+        )
+
+    @classmethod
+    def _should_penalize_error(cls, error_message: Optional[str]) -> bool:
+        if cls._is_rate_limited_error(error_message):
+            return True
+        lowered = (error_message or "").lower()
+        return any(
+            token in lowered
+            for token in (
+                "checking if",
+                "captcha",
+                "cloudflare",
+                "enable javascript",
+                "json解析失败",
+                "非json",
+            )
+        )
+
+    @classmethod
+    def _is_instance_penalized(cls, base_url: str, *, now: Optional[float] = None) -> bool:
+        ts = time.time() if now is None else now
+        with cls._penalized_instances_lock:
+            expire_at = cls._penalized_instances.get(base_url)
+            if expire_at is None:
+                return False
+            if expire_at <= ts:
+                cls._penalized_instances.pop(base_url, None)
+                return False
+            return True
+
+    @classmethod
+    def _mark_instance_penalized(cls, base_url: str, *, reason: str = "") -> None:
+        expire_at = time.time() + cls.INSTANCE_PENALTY_SECONDS
+        with cls._penalized_instances_lock:
+            cls._penalized_instances[base_url] = expire_at
+        logger.debug(
+            "[SearXNG] 实例 %s 进入 %ss 冷却，原因: %s",
+            base_url,
+            cls.INSTANCE_PENALTY_SECONDS,
+            cls._compact_error_text(reason or "unknown"),
+        )
+
+    @classmethod
+    def _filter_penalized_instances(cls, candidates: List[str]) -> List[str]:
+        if not candidates:
+            return []
+        now = time.time()
+        active: List[str] = []
+        deferred: List[str] = []
+        for base_url in candidates:
+            if cls._is_instance_penalized(base_url, now=now):
+                deferred.append(base_url)
+            else:
+                active.append(base_url)
+        if active:
+            return active
+        if deferred:
+            logger.debug(
+                "[SearXNG] 全部候选实例处于冷却，回退尝试 %s 个实例",
+                len(deferred),
+            )
+        return deferred
 
     @staticmethod
     def _parse_http_error(response) -> str:
         """Parse HTTP error details for easier diagnostics."""
+        status_code = getattr(response, "status_code", None)
+        if status_code == 429:
+            return "Too Many Requests (429)"
         try:
             raw_content_type = response.headers.get("content-type", "")
             content_type = raw_content_type if isinstance(raw_content_type, str) else ""
@@ -1735,15 +1826,18 @@ class SearXNGSearchProvider(BaseSearchProvider):
                 if isinstance(error_data, dict):
                     message = error_data.get("error") or error_data.get("message")
                     if message:
-                        return str(message)
-                return str(error_data)
+                        return SearXNGSearchProvider._compact_error_text(str(message))
+                return SearXNGSearchProvider._compact_error_text(str(error_data))
             raw_text = getattr(response, "text", "")
             body = raw_text.strip() if isinstance(raw_text, str) else ""
-            return body[:200] if body else f"HTTP {response.status_code}"
+            if body:
+                return SearXNGSearchProvider._compact_error_text(body)
+            return f"HTTP {response.status_code}"
         except Exception:
             raw_text = getattr(response, "text", "")
             body = raw_text if isinstance(raw_text, str) else ""
-            return f"HTTP {response.status_code}: {body[:200]}"
+            compact = SearXNGSearchProvider._compact_error_text(body)
+            return f"HTTP {response.status_code}: {compact}" if compact else f"HTTP {response.status_code}"
 
     @staticmethod
     def _time_range(days: int) -> str:
@@ -2036,6 +2130,7 @@ class SearXNGSearchProvider(BaseSearchProvider):
             timeout = self.PUBLIC_INSTANCES_TIMEOUT_SECONDS
             empty_error = "SearXNG 未配置可用实例"
 
+        candidates = self._filter_penalized_instances(candidates)
         if not candidates:
             return SearchResponse(
                 query=query,
@@ -2047,6 +2142,7 @@ class SearXNGSearchProvider(BaseSearchProvider):
             )
 
         errors: List[str] = []
+        rate_limit_failures = 0
         for base_url in candidates:
             response = self._do_search(
                 query,
@@ -2068,16 +2164,29 @@ class SearXNGSearchProvider(BaseSearchProvider):
                 )
                 return response
 
-            errors.append(f"{base_url}: {response.error_message or '未知错误'}")
-            logger.warning("[%s] 实例 %s 搜索失败: %s", self.name, base_url, response.error_message)
+            error_message = response.error_message or "未知错误"
+            errors.append(f"{base_url}: {error_message}")
+
+            if self._should_penalize_error(error_message):
+                self._mark_instance_penalized(base_url, reason=error_message)
+
+            if self._is_rate_limited_error(error_message):
+                rate_limit_failures += 1
+                logger.info("[%s] 实例 %s 触发限流: %s", self.name, base_url, error_message)
+            else:
+                logger.warning("[%s] 实例 %s 搜索失败: %s", self.name, base_url, error_message)
 
         elapsed = time.time() - start_time
+        if rate_limit_failures == len(candidates):
+            summary_error = f"SearXNG 实例全部限流（{rate_limit_failures}/{len(candidates)}）"
+        else:
+            summary_error = "；".join(errors[:3]) if errors else empty_error
         return SearchResponse(
             query=query,
             results=[],
             provider=self.name,
             success=False,
-            error_message="；".join(errors[:3]) if errors else empty_error,
+            error_message=summary_error,
             search_time=elapsed,
         )
 

@@ -553,6 +553,42 @@ class TestEnvAliasCompatibility:
 
         assert config.discord_interactions_public_key == "abcdef123456"
 
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_stock_list_normalizes_cross_market_variants(
+        self,
+        _mock_parse_yaml,
+        _mock_setup_env,
+    ):
+        with patch.dict(
+            "os.environ",
+            {
+                "STOCK_LIST": " sh600519,600519,00700,hk700,1810.hk,aapl,TSLA ",
+            },
+            clear=True,
+        ):
+            config = Config._load_from_env()
+
+        assert config.stock_list == ["600519", "HK00700", "HK01810", "AAPL", "TSLA"]
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_stock_list_keeps_unknown_tokens_uppercase(
+        self,
+        _mock_parse_yaml,
+        _mock_setup_env,
+    ):
+        with patch.dict(
+            "os.environ",
+            {
+                "STOCK_LIST": "^gspc,^GSPC, brk.b ",
+            },
+            clear=True,
+        ):
+            config = Config._load_from_env()
+
+        assert config.stock_list == ["^GSPC", "BRK.B"]
+
 
 # ---------------------------------------------------------------------------
 # validate() backward compatibility

@@ -138,6 +138,20 @@ class TestSearXNGSearchProvider(unittest.TestCase):
         self.assertIn("settings.yml", resp.error_message or "")
 
     @patch("src.search_service._get_with_retry")
+    def test_self_hosted_429_uses_compact_error_message(self, mock_get):
+        mock_get.return_value = self._response(
+            status_code=429,
+            text="<html><title>429 Too Many Requests</title></html>",
+            headers={"content-type": "text/html"},
+        )
+
+        provider = self._create_provider(["https://searx.example.org"])
+        resp = provider.search("query", max_results=5)
+
+        self.assertFalse(resp.success)
+        self.assertEqual(resp.error_message, "SearXNG 实例全部限流（1/1）")
+
+    @patch("src.search_service._get_with_retry")
     def test_self_hosted_empty_results_success(self, mock_get):
         mock_get.return_value = self._response(json_payload={"results": []})
 
@@ -237,6 +251,33 @@ class TestSearXNGSearchProvider(unittest.TestCase):
         self.assertEqual(mock_get.call_count, 2)
         self.assertIn("https://searx-a.example.org/search", mock_get.call_args_list[0][0][0])
         self.assertIn("https://searx-b.example.org/search", mock_get.call_args_list[1][0][0])
+
+    @patch("src.search_service._get_with_retry")
+    def test_rate_limited_instance_enters_cooldown_and_is_skipped_next_search(self, mock_get):
+        mock_get.side_effect = [
+            self._response(
+                status_code=429,
+                text="Too Many Requests",
+                headers={"content-type": "text/plain"},
+            ),
+            self._response(
+                json_payload={"results": [{"title": "OK", "url": "https://ok.example", "content": "done"}]}
+            ),
+            self._response(json_payload={"results": []}),
+        ]
+
+        provider = self._create_provider(
+            ["https://searx-a.example.org", "https://searx-b.example.org"]
+        )
+        first = provider.search("first", max_results=5)
+        second = provider.search("second", max_results=5)
+
+        self.assertTrue(first.success)
+        self.assertTrue(second.success)
+        self.assertEqual(mock_get.call_count, 3)
+        self.assertIn("https://searx-a.example.org/search", mock_get.call_args_list[0][0][0])
+        self.assertIn("https://searx-b.example.org/search", mock_get.call_args_list[1][0][0])
+        self.assertIn("https://searx-b.example.org/search", mock_get.call_args_list[2][0][0])
 
     def test_public_instance_extraction_filters_and_sorts(self):
         payload = {

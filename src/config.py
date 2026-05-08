@@ -24,6 +24,7 @@ from src.report_language import (
     is_supported_report_language_value,
     normalize_report_language,
 )
+from src.services.stock_code_utils import normalize_code
 
 logger = logging.getLogger(__name__)
 
@@ -971,6 +972,41 @@ class Config:
     _instance: Optional['Config'] = None
     
     @classmethod
+    def _normalize_watchlist_code(cls, value: str) -> str:
+        """Normalize one watchlist code to a canonical runtime form.
+
+        Rules:
+        - Strip exchange prefix/suffix when possible (e.g. SH600519, 1810.HK).
+        - Keep US tickers uppercase (e.g. aapl -> AAPL).
+        - Canonicalize HK numeric codes to HKxxxxx for dedupe consistency
+          (e.g. 700, 00700, hk700 -> HK00700).
+        - Preserve unknown tokens in uppercase for backward compatibility.
+        """
+        raw = (value or "").strip()
+        if not raw:
+            return ""
+
+        normalized = normalize_code(raw)
+        canonical = (normalized or raw).strip().upper()
+        if canonical.isdigit() and len(canonical) == 5:
+            return f"HK{canonical}"
+        return canonical
+
+    @classmethod
+    def _parse_stock_list(cls, raw_value: Optional[str]) -> List[str]:
+        """Parse and normalize STOCK_LIST while preserving order and uniqueness."""
+        values = (raw_value or "").split(",")
+        seen: set[str] = set()
+        result: List[str] = []
+        for item in values:
+            code = cls._normalize_watchlist_code(item)
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            result.append(code)
+        return result
+
+    @classmethod
     def get_instance(cls) -> 'Config':
         """
         获取配置单例实例
@@ -1048,11 +1084,7 @@ class Config:
             default='',
             prefer_env_file=True,
         )
-        stock_list = [
-            (c or "").strip().upper()
-            for c in stock_list_str.split(',')
-            if (c or "").strip()
-        ]
+        stock_list = cls._parse_stock_list(stock_list_str)
         
         # 如果没有配置，使用默认的示例股票
         if not stock_list:
@@ -2189,11 +2221,7 @@ class Config:
         if not stock_list_str:
             stock_list_str = os.getenv('STOCK_LIST', '')
 
-        stock_list = [
-            (c or "").strip().upper()
-            for c in stock_list_str.split(',')
-            if (c or "").strip()
-        ]
+        stock_list = self._parse_stock_list(stock_list_str)
 
         if not stock_list:
             stock_list = ['000001']
